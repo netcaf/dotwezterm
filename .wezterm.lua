@@ -60,6 +60,9 @@ config.ssh_domains = {}
 
 -- Launch menu: right-click the + on the tab bar (no default shortcut; or search "launcher" in Ctrl+Shift+P).
 -- SSH entries are generated from ~/.ssh/config (to add a host, edit only the ssh config, not this file).
+-- Closing it: Esc always works; right-clicking again on the blank area below the list also closes
+-- it (confirmed by testing — the same button that opens it also closes it). Left-clicking outside
+-- the list does NOT close it — there's no generic "click away to dismiss" handling for this widget.
 config.launch_menu = {
   { label = 'PowerShell', args = { 'powershell.exe', '-NoLogo' } },
   { label = 'CMD', args = { 'cmd.exe' } },
@@ -286,7 +289,10 @@ wezterm.on('format-tab-title', function(tab)
     c = { at = os.time(), target = ok and argv and ssh_target(argv) }
     cache[p.pane_id] = c
   end
-  return string.format(' %d: %s ', tab.tab_index + 1, c.target or p.title)
+  -- Fall back titles are sometimes a full path (e.g. "C:\WINDOWS\...\powershell.exe"); show
+  -- just the last path segment instead of the whole thing.
+  local label = c.target or (p.title:match('([^\\/]+)$') or p.title)
+  return string.format(' %d: %s ', tab.tab_index + 1, label)
 end)
 
 return config
