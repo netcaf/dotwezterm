@@ -85,12 +85,25 @@ table.sort(ssh_hosts)
 -- link dropped (a network blip kills the pty before it can send the disable sequence), WezTerm keeps
 -- turning every mouse move in this pane into '<Cb;Cx;CyM' escape codes fed into the next shell, which
 -- shows up as '35;33;16M: command not found' garbage. Disable all mouse modes before every (re)connect.
+-- Tab color marker (see format-tab-title below): the script tells WezTerm "disconnected" /
+-- "connected" directly via OSC 1337 SetUserVar at the moment each happens, rather than WezTerm
+-- guessing from on-screen text. (An earlier version scanned the pane's visible text for the
+-- literal "[disconnected]" message, but that text never leaves the visible/scrollback window on
+-- its own -- if the reconnected session stays quiet, nothing ever pushes it out, so the marker
+-- got stuck red after a successful reconnect. A user var is set/cleared explicitly, so it can't
+-- go stale like that.)
 local reconnect = [[
+function Set-WeztermVar($n, $v) {
+  $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($v))
+  Write-Host -NoNewline "$([char]27)]1337;SetUserVar=$n=$b64$([char]7)"
+}
 $mouseReset = "$([char]27)[?1000l$([char]27)[?1002l$([char]27)[?1003l$([char]27)[?1006l$([char]27)[?1015l"
 while ($true) {
   Write-Host -NoNewline $mouseReset
+  Set-WeztermVar 'ssh_disconnected' '0'
   ssh -o ConnectTimeout=10 %s
   if ($LASTEXITCODE -eq 0) { break }
+  Set-WeztermVar 'ssh_disconnected' '1'
   Write-Host ''
   Write-Host '[disconnected] press Enter to reconnect to %s, or Ctrl+Shift+W to close this tab' -ForegroundColor Yellow
   [void](Read-Host)
@@ -285,14 +298,29 @@ wezterm.on('format-tab-title', function(tab)
   local p = tab.active_pane
   local c = cache[p.pane_id]
   if not c or os.time() - c.at >= 3 then
-    local ok, argv = pcall(user_ssh_argv, wezterm.mux.get_pane(p.pane_id))
-    c = { at = os.time(), target = ok and argv and ssh_target(argv) }
+    local mux_pane = wezterm.mux.get_pane(p.pane_id)
+    local ok, argv = pcall(user_ssh_argv, mux_pane)
+    c = {
+      at = os.time(),
+      target = ok and argv and ssh_target(argv),
+    }
     cache[p.pane_id] = c
   end
   -- Fall back titles are sometimes a full path (e.g. "C:\WINDOWS\...\powershell.exe"); show
   -- just the last path segment instead of the whole thing.
   local label = c.target or (p.title:match('([^\\/]+)$') or p.title)
-  return string.format(' %d: %s ', tab.tab_index + 1, label)
+  local text = string.format(' %d: %s ', tab.tab_index + 1, label)
+  -- Set directly by the reconnect script via OSC 1337 SetUserVar (not cached: reading it is
+  -- free, and caching it would just reintroduce the staleness this replaced).
+  if p.user_vars.ssh_disconnected == '1' then
+    return {
+      -- A saturated red rather than Catppuccin's pastel Red (#f38ba8, reads as pink) -- picked
+      -- for clear contrast against both the Mocha and Latte backgrounds, so no theme branching.
+      { Foreground = { Color = '#e64553' } },
+      { Text = '\u{25cf} ' .. text }, -- solid dot marker (readable even without color)
+    }
+  end
+  return text
 end)
 
 return config
