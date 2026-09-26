@@ -46,7 +46,9 @@ config.audible_bell = 'Disabled'                        -- no beep
 -- Active endings (you typed exit/quit and it exited cleanly) close the tab automatically, since
 -- that was your own intent. Ctrl+Shift+W always force-closes a held tab either way.
 config.exit_behavior = 'CloseOnCleanExit'
-config.exit_behavior_messaging = 'Verbose'              -- explain in the tab whenever it's held open
+-- Terse ([Exited with code N]) rather than Verbose: Verbose prints the full launch command,
+-- which for an SSH tab means dumping the entire multi-line reconnect script inline.
+config.exit_behavior_messaging = 'Terse'
 
 -- Normalize pasted newlines to CR (same as pressing Enter). Windows sends CRLF by default,
 -- and remote vim etc. count CR and LF as separate line breaks, adding a blank line after every line.
@@ -57,6 +59,13 @@ config.canonicalize_pasted_newlines = 'CarriageReturn'
 -- its password prompt enables bracketed paste and never disables it, so pasting into
 -- old bash (e.g. CentOS 7) shows 0~...1~.
 config.ssh_domains = {}
+
+-- Since WezTerm's own SSH is unused (above), also stop it from pointing every local pane's
+-- SSH_AUTH_SOCK at its own agent-forwarding proxy socket (nightly default as of 2024/2025).
+-- That path isn't the real Windows OpenSSH agent pipe, so ssh can't find the agent through it
+-- and falls back to reading private keys straight from disk, prompting for the passphrase on
+-- every connection even though the real ssh-agent service already has the key unlocked.
+config.mux_enable_ssh_agent = false
 
 -- Launch menu: right-click the + on the tab bar (no default shortcut; or search "launcher" in Ctrl+Shift+P).
 -- SSH entries are generated from ~/.ssh/config (to add a host, edit only the ssh config, not this file).
@@ -85,19 +94,18 @@ table.sort(ssh_hosts)
 -- link dropped (a network blip kills the pty before it can send the disable sequence), WezTerm keeps
 -- turning every mouse move in this pane into '<Cb;Cx;CyM' escape codes fed into the next shell, which
 -- shows up as '35;33;16M: command not found' garbage. Disable all mouse modes before every (re)connect.
--- Tab color marker (see format-tab-title below): the script tells WezTerm "disconnected" /
--- "connected" directly via OSC 1337 SetUserVar at the moment each happens, rather than WezTerm
--- guessing from on-screen text. (An earlier version scanned the pane's visible text for the
--- literal "[disconnected]" message, but that text never leaves the visible/scrollback window on
--- its own -- if the reconnected session stays quiet, nothing ever pushes it out, so the marker
--- got stuck red after a successful reconnect. A user var is set/cleared explicitly, so it can't
--- go stale like that.)
+-- Tab marker (see format-tab-title below): the script tells WezTerm the target host and
+-- disconnect state directly via OSC 1337 SetUserVar at the moment each happens, rather than
+-- WezTerm guessing from process info or on-screen text (both go stale: once ssh exits, there's
+-- no ssh process left to read the host from, and disconnect text printed to the screen never
+-- leaves the scrollback on its own if the reconnected session stays quiet).
 local reconnect = [[
 function Set-WeztermVar($n, $v) {
   $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($v))
   Write-Host -NoNewline "$([char]27)]1337;SetUserVar=$n=$b64$([char]7)"
 }
 $mouseReset = "$([char]27)[?1000l$([char]27)[?1002l$([char]27)[?1003l$([char]27)[?1006l$([char]27)[?1015l"
+Set-WeztermVar 'ssh_target' '%s'
 while ($true) {
   Write-Host -NoNewline $mouseReset
   Set-WeztermVar 'ssh_disconnected' '0'
@@ -113,7 +121,7 @@ while ($true) {
 for _, host in ipairs(ssh_hosts) do
   table.insert(config.launch_menu, {
     label = 'SSH ' .. host,
-    args = { 'powershell.exe', '-NoLogo', '-NoProfile', '-Command', reconnect:format(host, host) },
+    args = { 'powershell.exe', '-NoLogo', '-NoProfile', '-Command', reconnect:format(host, host, host) },
   })
 end
 
@@ -198,9 +206,10 @@ config.keys = {
       if ok and argv then
         local parts = {}
         for i = 2, #argv do table.insert(parts, ps_quote(argv[i])) end
+        local target_label = ssh_target(argv) or 'host'
         win:perform_action(act.SpawnCommandInNewTab {
           args = { 'powershell.exe', '-NoLogo', '-NoProfile', '-Command',
-                   reconnect:format(table.concat(parts, ' '), ssh_target(argv) or 'host') },
+                   reconnect:format(target_label, table.concat(parts, ' '), target_label) },
         }, pane)
         return
       end
@@ -306,19 +315,14 @@ wezterm.on('format-tab-title', function(tab)
     }
     cache[p.pane_id] = c
   end
-  -- Fall back titles are sometimes a full path (e.g. "C:\WINDOWS\...\powershell.exe"); show
-  -- just the last path segment instead of the whole thing.
-  local label = c.target or (p.title:match('([^\\/]+)$') or p.title)
+  -- p.user_vars.ssh_target (set by the reconnect script) survives ssh exiting on disconnect,
+  -- when there's no ssh process left for c.target's process-tree walk to find. Fall back titles
+  -- are sometimes a full path (e.g. "C:\WINDOWS\...\powershell.exe"); show just the last path
+  -- segment instead of the whole thing.
+  local label = p.user_vars.ssh_target or c.target or (p.title:match('([^\\/]+)$') or p.title)
   local text = string.format(' %d: %s ', tab.tab_index + 1, label)
-  -- Set directly by the reconnect script via OSC 1337 SetUserVar (not cached: reading it is
-  -- free, and caching it would just reintroduce the staleness this replaced).
   if p.user_vars.ssh_disconnected == '1' then
-    return {
-      -- A saturated red rather than Catppuccin's pastel Red (#f38ba8, reads as pink) -- picked
-      -- for clear contrast against both the Mocha and Latte backgrounds, so no theme branching.
-      { Foreground = { Color = '#e64553' } },
-      { Text = '\u{25cf} ' .. text }, -- solid dot marker (readable even without color)
-    }
+    return '\u{25cf} ' .. text -- solid dot marker, no color change
   end
   return text
 end)
