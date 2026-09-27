@@ -319,12 +319,16 @@ wezterm.on('format-tab-title', function(tab)
   -- when there's no ssh process left for c.target's process-tree walk to find. Fall back titles
   -- are sometimes a full path (e.g. "C:\WINDOWS\...\powershell.exe"); show just the last path
   -- segment instead of the whole thing.
-  local label = p.user_vars.ssh_target or c.target or (p.title:match('([^\\/]+)$') or p.title)
+  local ssh_label = p.user_vars.ssh_target or c.target
+  local label = ssh_label or (p.title:match('([^\\/]+)$') or p.title)
   local text = string.format(' %d: %s ', tab.tab_index + 1, label)
-  if p.user_vars.ssh_disconnected == '1' then
-    return '\u{25cf} ' .. text -- solid dot marker, no color change
-  end
-  return text
+  if not ssh_label then return text end
+  -- Colored circle emoji carry their own color (green/red) from the emoji font itself, unlike a
+  -- Foreground attribute set via wezterm.format, which bleeds into later tab-title segments and
+  -- even the close button and can't be reset reliably (wezterm/wezterm#7167). So a plain emoji
+  -- glyph is the robust way to color part of a tab title without touching the rest of it.
+  local dot = p.user_vars.ssh_disconnected == '1' and '\u{1F534}' or '\u{1F7E2}'
+  return dot .. text
 end)
 
 return config
